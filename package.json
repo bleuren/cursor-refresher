@@ -1,0 +1,89 @@
+{
+  "name": "cursor-refresh-ext",
+  "displayName": "CursorRefresh",
+  "description": "Refresh Cursor editor machine code and manage email aliases",
+  "version": "0.0.1",
+  "publisher": "bleuren",
+  "icon": "icon.png",
+  "author": {
+      "name": "bleuren"
+  },
+  "engines": {
+      "vscode": "^1.85.0"
+  },
+  "categories": [
+      "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+      "commands": [
+          {
+              "command": "cursor-refresh.refreshCursor",
+              "title": "Refresh Cursor Configuration"
+          }
+      ],
+      "configuration": {
+          "title": "CursorRefresh",
+          "properties": {
+              "cursor-refresh.addyApiKey": {
+                  "type": "string",
+                  "default": "",
+                  "description": "Addy.io API Key"
+              },
+              "cursor-refresh.addyApiUrl": {
+                  "type": "string",
+                  "default": "https://app.addy.io/api/v1/aliases",
+                  "description": "Addy.io API URL"
+              },
+              "cursor-refresh.aliasDescription": {
+                  "type": "string",
+                  "default": "cursor",
+                  "description": "Alias description"
+              },
+              "cursor-refresh.aliasDomain": {
+                  "type": "string",
+                  "default": "anonaddy.me",
+                  "description": "Alias domain"
+              },
+              "cursor-refresh.aliasFormat": {
+                  "type": "string",
+                  "default": "uuid",
+                  "description": "Alias format"
+              },
+              "cursor-refresh.recipientIds": {
+                  "type": "array",
+                  "items": {
+                      "type": "string"
+                  },
+                  "default": [],
+                  "description": "Recipient IDs (optional)"
+              }
+          }
+      }
+  },
+  "scripts": {
+      "vscode:prepublish": "npm run compile",
+      "compile": "tsc -p ./",
+      "watch": "tsc -watch -p ./",
+      "pretest": "npm run compile && npm run lint",
+      "lint": "eslint src --ext ts",
+      "test": "vscode-test"
+  },
+  "repository": {
+      "type": "git",
+      "url": "https://github.com/bleuren/cursor-refresh-ext.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+      "@types/vscode": "^1.85.0",
+      "@types/node": "18.x",
+      "@typescript-eslint/eslint-plugin": "^6.13.1",
+      "@typescript-eslint/parser": "^6.13.1",
+      "eslint": "^8.54.0",
+      "typescript": "^5.3.2"
+  },
+  "dependencies": {
+      "axios": "^1.6.2"
+  }
+}
