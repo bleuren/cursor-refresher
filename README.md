@@ -36,7 +36,7 @@ This extension contributes the following settings:
 ## Notes
 
 - Please ensure Cursor is not running when using this extension
-- Make sure to back up any important data before refreshting
+- Make sure to back up any important data before refreshing
 - This extension only works on macOS
 
 ## Disclaimer
