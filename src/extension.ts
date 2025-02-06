@@ -18,15 +18,29 @@ interface Config {
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    let disposable = vscode.commands.registerCommand('cursor-refresh.refreshCursor', async () => {
+    // Register command for refreshing Cursor identifiers
+    let identifiersCommand = vscode.commands.registerCommand('cursor-refresher.refreshIdentifiers', async () => {
         try {
             const config = loadConfig();
-            const newEmail = await refreshCursor(config);
+            await refreshCursorIdentifiers(config);
+            vscode.window.showInformationMessage('Cursor identifiers have been refreshed successfully!');
+        } catch (error) {
+            vscode.window.showErrorMessage(`Error refreshing Cursor identifiers: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    });
+
+    // Register command for refreshing email alias
+    let emailCommand = vscode.commands.registerCommand('cursor-refresher.refreshEmail', async () => {
+        try {
+            const config = loadConfig();
+            if (!config.addyApiKey) {
+                throw new Error('Addy.io API key is required');
+            }
+            const newEmail = await refreshAddyAliases(config);
             
-            // Show message with copy button
             const copyAction = 'Copy Email';
             const selection = await vscode.window.showInformationMessage(
-                `Cursor refresh completed successfully! New email: ${newEmail}`,
+                `Email alias has been refreshed! New email: ${newEmail}`,
                 copyAction
             );
 
@@ -35,15 +49,15 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage('Email copied to clipboard!');
             }
         } catch (error) {
-            vscode.window.showErrorMessage(`Error: ${error instanceof Error ? error.message : String(error)}`);
+            vscode.window.showErrorMessage(`Error refreshing email: ${error instanceof Error ? error.message : String(error)}`);
         }
     });
 
-    context.subscriptions.push(disposable);
+    context.subscriptions.push(identifiersCommand, emailCommand);
 }
 
 function loadConfig(): Config {
-    const config = vscode.workspace.getConfiguration('cursor-refresh');
+    const config = vscode.workspace.getConfiguration('cursor-refresher');
     const home = homedir();
 
     return {
@@ -63,7 +77,7 @@ function generateHexId(length: number = 64): string {
     return Array.from({ length }, () => hex[Math.floor(Math.random() * hex.length)]).join('');
 }
 
-function handleMsDeviceId(config: Config): string {
+function refreshMsDeviceId(config: Config): string {
     const newDeviceId = randomUUID();
     const path = config.msDeviceIdPath;
 
@@ -75,7 +89,7 @@ function handleMsDeviceId(config: Config): string {
     return newDeviceId;
 }
 
-async function updateStorageIds(config: Config): Promise<void> {
+async function refreshStorageIds(config: Config): Promise<void> {
     const path = config.storageJsonPath;
     if (!existsSync(path)) {
         throw new Error(`Storage file not found: ${path}`);
@@ -94,12 +108,12 @@ async function updateStorageIds(config: Config): Promise<void> {
 
     data["telemetry.macMachineId"] = generateHexId();
     data["telemetry.machineId"] = generateHexId();
-    data["telemetry.devDeviceId"] = handleMsDeviceId(config);
+    data["telemetry.devDeviceId"] = refreshMsDeviceId(config);
 
     writeFileSync(path, JSON.stringify(data, null, 4));
 }
 
-async function manageAddyAliases(config: Config): Promise<string> {
+async function refreshAddyAliases(config: Config): Promise<string> {
     const headers = {
         Authorization: `Bearer ${config.addyApiKey}`,
         'Content-Type': 'application/json',
@@ -136,7 +150,7 @@ async function manageAddyAliases(config: Config): Promise<string> {
     return newAlias;
 }
 
-async function refreshCursor(config: Config): Promise<string> {
+async function refreshCursorIdentifiers(config: Config): Promise<void> {
     // Kill Cursor process
     try {
         execSync('pkill -9 Cursor');
@@ -144,13 +158,7 @@ async function refreshCursor(config: Config): Promise<string> {
         // Ignore if process not found
     }
 
-    if (!config.addyApiKey) {
-        throw new Error('Addy.io API key is required');
-    }
-
-    await updateStorageIds(config);
-    const newEmail = await manageAddyAliases(config);
-    return newEmail;
+    await refreshStorageIds(config);
 }
 
 export function deactivate() {}
