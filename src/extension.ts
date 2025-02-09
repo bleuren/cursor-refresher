@@ -2,163 +2,277 @@ import * as vscode from 'vscode';
 import { execSync } from 'child_process';
 import { homedir } from 'os';
 import { join } from 'path';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
 
-interface Config {
-    storageJsonPath: string;
-    msDeviceIdPath: string;
-    addyApiKey: string;
-    addyApiUrl: string;
-    aliasDescription: string;
-    aliasDomain: string;
-    aliasFormat: string;
-    recipientIds: string[];
+interface StorageData {
+    'telemetry.macMachineId': string;
+    'telemetry.machineId': string;
+    'telemetry.devDeviceId': string;
+    'telemetry.sqmId': string;
+    [key: string]: string;
+}
+
+interface AddyAlias {
+    id: string;
+    email: string;
+    description?: string;
+    [key: string]: unknown;
+}
+
+class ExtensionConfig {
+    private static readonly SYSTEM_PATHS = {
+        storage: 'Library/Application Support/Cursor/User/globalStorage/storage.json',
+        deviceId: 'Library/Application Support/Microsoft/DeveloperTools/deviceid',
+        mainJs: '/Applications/Cursor.app/Contents/Resources/app/out/main.js',
+        platformUuid: '/var/root/Library/Preferences/SystemConfiguration/com.apple.platform.uuid.plist'
+    };
+
+    private static readonly API_DEFAULTS = {
+        url: 'https://app.addy.io/api/v1/aliases',
+        domain: 'anonaddy.me',
+        format: 'uuid',
+        description: 'cursor'
+    };
+
+    constructor(private readonly config: vscode.WorkspaceConfiguration) {}
+
+    get paths() {
+        const home = homedir();
+        return {
+            storage: join(home, ExtensionConfig.SYSTEM_PATHS.storage),
+            deviceId: join(home, ExtensionConfig.SYSTEM_PATHS.deviceId),
+            mainJs: ExtensionConfig.SYSTEM_PATHS.mainJs,
+            platformUuid: ExtensionConfig.SYSTEM_PATHS.platformUuid
+        };
+    }
+
+    get addyConfig() {
+        return {
+            apiKey: this.config.get<string>('addyApiKey', ''),
+            apiUrl: this.config.get<string>('addyApiUrl', ExtensionConfig.API_DEFAULTS.url),
+            description: this.config.get<string>('aliasDescription', ExtensionConfig.API_DEFAULTS.description),
+            domain: this.config.get<string>('aliasDomain', ExtensionConfig.API_DEFAULTS.domain),
+            format: this.config.get<string>('aliasFormat', ExtensionConfig.API_DEFAULTS.format),
+            recipientIds: this.config.get<string[]>('recipientIds', [])
+        };
+    }
+}
+
+class SystemIdentifierManager {
+    private static readonly HEX_CHARS = '0123456789abcdef';
+
+    constructor(private readonly config: ExtensionConfig) {}
+
+    private static generateHexId(length: number = 64): string {
+        return Array.from(
+            { length }, 
+            () => this.HEX_CHARS[Math.floor(Math.random() * this.HEX_CHARS.length)]
+        ).join('');
+    }
+
+    async refresh(): Promise<void> {
+        await this.killCursorProcess();
+        await this.modifyMainJs();
+        await this.refreshIdentifiers();
+    }
+
+    private async killCursorProcess(): Promise<void> {
+        try {
+            execSync('pkill -9 Cursor');
+        } catch {
+            // Ignore if process not found
+        }
+    }
+
+    private async modifyMainJs(): Promise<void> {
+        const mainJsPath = this.config.paths.mainJs;
+        try {
+            const content = readFileSync(mainJsPath, 'utf8');
+            const updatedContent = this.updateMainJsContent(content);
+            writeFileSync(mainJsPath, updatedContent);
+        } catch (error) {
+            throw new Error(`Failed to modify main.js: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    private updateMainJsContent(content: string): string {
+        const patterns = {
+            getMachineId: /async getMachineId\(\)\{return [^??]+\?\?([^}]+)\}/,
+            getMacMachineId: /async getMacMachineId\(\)\{return [^??]+\?\?([^}]+)\}/
+        };
+
+        let modifiedContent = content;
+        for (const [key, pattern] of Object.entries(patterns)) {
+            const match = content.match(pattern);
+            if (match) {
+                const replacement = `async ${key}(){return ${match[1]}}`;
+                modifiedContent = modifiedContent.replace(pattern, replacement);
+            }
+        }
+        return modifiedContent;
+    }
+
+    private async refreshIdentifiers(): Promise<void> {
+        const storage = this.readStorageFile();
+        const { newIds, macMachineId } = this.generateNewIdentifiers();
+        
+        Object.assign(storage, newIds);
+        await this.updatePlatformUuid(macMachineId);
+        
+        writeFileSync(this.config.paths.storage, JSON.stringify(storage, null, 4));
+    }
+
+    private readStorageFile(): StorageData {
+        const path = this.config.paths.storage;
+        if (!existsSync(path)) {
+            throw new Error(`Storage file not found: ${path}`);
+        }
+
+        const data = JSON.parse(readFileSync(path, 'utf8')) as StorageData;
+        const requiredFields = [
+            'telemetry.macMachineId',
+            'telemetry.machineId',
+            'telemetry.devDeviceId',
+            'telemetry.sqmId'
+        ];
+
+        if (!requiredFields.every(field => field in data)) {
+            throw new Error('Missing required fields in storage.json');
+        }
+
+        return data;
+    }
+
+    private generateNewIdentifiers() {
+        const newDeviceId = this.refreshDeviceId();
+        const macMachineId = SystemIdentifierManager.generateHexId(128);
+
+        return {
+            newIds: {
+                'telemetry.macMachineId': macMachineId,
+                'telemetry.machineId': SystemIdentifierManager.generateHexId(64),
+                'telemetry.devDeviceId': newDeviceId,
+                'telemetry.sqmId': `{${randomUUID().toUpperCase()}}`
+            },
+            macMachineId
+        };
+    }
+
+    private refreshDeviceId(): string {
+        const newDeviceId = randomUUID();
+        const path = this.config.paths.deviceId;
+
+        if (existsSync(path)) {
+            writeFileSync(path, newDeviceId);
+        }
+
+        return newDeviceId;
+    }
+
+    private async updatePlatformUuid(macMachineId: string): Promise<void> {
+        const uuidFile = this.config.paths.platformUuid;
+        try {
+            if (existsSync(uuidFile)) {
+                const cmd = `sudo plutil -replace "UUID" -string "${macMachineId}" "${uuidFile}"`;
+                execSync(cmd);
+            }
+        } catch (error) {
+            throw new Error(`Failed to update macOS Platform UUID: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+}
+
+class EmailAliasManager {
+    constructor(private readonly config: ExtensionConfig) {}
+
+    async refresh(): Promise<string> {
+        if (!this.config.addyConfig.apiKey) {
+            throw new Error('Addy.io API key is required');
+        }
+
+        await this.deleteExistingAliases();
+        return this.createNewAlias();
+    }
+
+    private get headers() {
+        return {
+            Authorization: `Bearer ${this.config.addyConfig.apiKey}`,
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+        };
+    }
+
+    private async deleteExistingAliases(): Promise<void> {
+        const { apiUrl, description } = this.config.addyConfig;
+        const response = await axios.get<{ data: AddyAlias[] }>(apiUrl, {
+            headers: this.headers,
+            params: {
+                'filter[search]': description,
+                'page[size]': 100
+            }
+        });
+
+        const aliases = response.data.data.filter(alias => 
+            alias.description?.startsWith(description)
+        );
+
+        await Promise.all(
+            aliases.map(alias => 
+                axios.delete(`${apiUrl}/${alias.id}`, { headers: this.headers })
+            )
+        );
+    }
+
+    private async createNewAlias(): Promise<string> {
+        const { apiUrl, domain, description, format, recipientIds } = this.config.addyConfig;
+        const payload = {
+            domain,
+            description,
+            format,
+            ...(recipientIds.length && { recipient_ids: recipientIds })
+        };
+
+        const response = await axios.post(apiUrl, payload, { headers: this.headers });
+        return response.data.data.email || '';
+    }
 }
 
 export function activate(context: vscode.ExtensionContext) {
-    // Register command for refreshing Cursor identifiers
-    let identifiersCommand = vscode.commands.registerCommand('cursor-refresher.refreshIdentifiers', async () => {
-        try {
-            const config = loadConfig();
-            await refreshCursorIdentifiers(config);
-            vscode.window.showInformationMessage('Cursor identifiers have been refreshed successfully!');
-        } catch (error) {
-            vscode.window.showErrorMessage(`Error refreshing Cursor identifiers: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    });
+    const config = new ExtensionConfig(vscode.workspace.getConfiguration('cursor-refresher'));
+    const systemManager = new SystemIdentifierManager(config);
+    const emailManager = new EmailAliasManager(config);
 
-    // Register command for refreshing email alias
-    let emailCommand = vscode.commands.registerCommand('cursor-refresher.refreshEmail', async () => {
-        try {
-            const config = loadConfig();
-            if (!config.addyApiKey) {
-                throw new Error('Addy.io API key is required');
+    context.subscriptions.push(
+        vscode.commands.registerCommand('cursor-refresher.refreshIdentifiers', async () => {
+            try {
+                await systemManager.refresh();
+                vscode.window.showInformationMessage('Cursor identifiers have been refreshed successfully!');
+            } catch (error) {
+                vscode.window.showErrorMessage(`Error refreshing Cursor identifiers: ${error instanceof Error ? error.message : String(error)}`);
             }
-            const newEmail = await refreshAddyAliases(config);
-            
-            const copyAction = 'Copy Email';
-            const selection = await vscode.window.showInformationMessage(
-                `Email alias has been refreshed! New email: ${newEmail}`,
-                copyAction
-            );
+        }),
 
-            if (selection === copyAction) {
-                await vscode.env.clipboard.writeText(newEmail);
-                vscode.window.showInformationMessage('Email copied to clipboard!');
+        vscode.commands.registerCommand('cursor-refresher.refreshEmail', async () => {
+            try {
+                const newEmail = await emailManager.refresh();
+                const copyAction = 'Copy Email';
+                
+                const selection = await vscode.window.showInformationMessage(
+                    `Email alias has been refreshed! New email: ${newEmail}`,
+                    copyAction
+                );
+
+                if (selection === copyAction) {
+                    await vscode.env.clipboard.writeText(newEmail);
+                    vscode.window.showInformationMessage('Email copied to clipboard!');
+                }
+            } catch (error) {
+                vscode.window.showErrorMessage(`Error refreshing email: ${error instanceof Error ? error.message : String(error)}`);
             }
-        } catch (error) {
-            vscode.window.showErrorMessage(`Error refreshing email: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    });
-
-    context.subscriptions.push(identifiersCommand, emailCommand);
-}
-
-function loadConfig(): Config {
-    const config = vscode.workspace.getConfiguration('cursor-refresher');
-    const home = homedir();
-
-    return {
-        storageJsonPath: join(home, 'Library/Application Support/Cursor/User/globalStorage/storage.json'),
-        msDeviceIdPath: join(home, 'Library/Application Support/Microsoft/DeveloperTools/deviceid'),
-        addyApiKey: config.get('addyApiKey', ''),
-        addyApiUrl: config.get('addyApiUrl', 'https://app.addy.io/api/v1/aliases'),
-        aliasDescription: config.get('aliasDescription', 'cursor'),
-        aliasDomain: config.get('aliasDomain', 'anonaddy.me'),
-        aliasFormat: config.get('aliasFormat', 'uuid'),
-        recipientIds: config.get('recipientIds', [])
-    };
-}
-
-function generateHexId(length: number = 64): string {
-    const hex = '0123456789abcdef';
-    return Array.from({ length }, () => hex[Math.floor(Math.random() * hex.length)]).join('');
-}
-
-function refreshMsDeviceId(config: Config): string {
-    const newDeviceId = randomUUID();
-    const path = config.msDeviceIdPath;
-
-    if (existsSync(path)) {
-        mkdirSync(join(path, '..'), { recursive: true });
-        writeFileSync(path, newDeviceId);
-    }
-
-    return newDeviceId;
-}
-
-async function refreshStorageIds(config: Config): Promise<void> {
-    const path = config.storageJsonPath;
-    if (!existsSync(path)) {
-        throw new Error(`Storage file not found: ${path}`);
-    }
-
-    const data = JSON.parse(readFileSync(path, 'utf8'));
-    const requiredFields = [
-        "telemetry.macMachineId",
-        "telemetry.machineId",
-        "telemetry.devDeviceId"
-    ];
-
-    if (!requiredFields.every(field => field in data)) {
-        throw new Error('Missing required fields in storage.json');
-    }
-
-    data["telemetry.macMachineId"] = generateHexId();
-    data["telemetry.machineId"] = generateHexId();
-    data["telemetry.devDeviceId"] = refreshMsDeviceId(config);
-
-    writeFileSync(path, JSON.stringify(data, null, 4));
-}
-
-async function refreshAddyAliases(config: Config): Promise<string> {
-    const headers = {
-        Authorization: `Bearer ${config.addyApiKey}`,
-        'Content-Type': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest'
-    };
-
-    // Delete existing aliases
-    const response = await axios.get(config.addyApiUrl, {
-        headers,
-        params: {
-            'filter[search]': config.aliasDescription,
-            'page[size]': 100
-        }
-    });
-
-    const aliases = response.data.data.filter((alias: any) => 
-        alias.description?.startsWith(config.aliasDescription)
+        })
     );
-
-    for (const alias of aliases) {
-        await axios.delete(`${config.addyApiUrl}/${alias.id}`, { headers });
-    }
-
-    // Create new alias
-    const payload = {
-        domain: config.aliasDomain,
-        description: config.aliasDescription,
-        format: config.aliasFormat,
-        ...(config.recipientIds.length && { recipient_ids: config.recipientIds })
-    };
-
-    const createResponse = await axios.post(config.addyApiUrl, payload, { headers });
-    const newAlias = createResponse.data.data.email || '';
-    return newAlias;
-}
-
-async function refreshCursorIdentifiers(config: Config): Promise<void> {
-    // Kill Cursor process
-    try {
-        execSync('pkill -9 Cursor');
-    } catch (error) {
-        // Ignore if process not found
-    }
-
-    await refreshStorageIds(config);
 }
 
 export function deactivate() {}
