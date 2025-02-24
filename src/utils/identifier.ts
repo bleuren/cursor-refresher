@@ -1,6 +1,6 @@
 import { execSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { ExtensionConfig } from './config';
 
 interface StorageData {
@@ -12,21 +12,29 @@ interface StorageData {
 }
 
 export class SystemIdentifierManager {
-  private static readonly HEX_CHARS = '0123456789abcdef';
-
   constructor(private readonly config: ExtensionConfig) { }
 
-  private static generateHexId(length: number = 64): string {
-    return Array.from(
-      { length },
-      () => this.HEX_CHARS[Math.floor(Math.random() * this.HEX_CHARS.length)]
-    ).join('');
+  private static generateDeviceUUID(input: string): string {
+    const hash = createHash('md5').update(input).digest('hex');
+    return hash.replace(/(.{8})(.{4})(.{3})(.{3})(.{12})/, '$1-$2-3$3-8$4-$5');
+  }
+
+  private static generateMachineId(input: string): string {
+    return createHash('sha256').update(input).digest('hex');
+  }
+
+  private static generateMacMachineId(input: string): string {
+    return createHash('sha256').update(input + input).digest('hex');
   }
 
   async refresh(): Promise<void> {
-    await this.killCursorProcess();
-    await this.modifyMainJs();
-    await this.refreshIdentifiers();
+    try {
+      await this.killCursorProcess();
+      await this.modifyMainJs();
+      await this.refreshIdentifiers();
+    } catch (error) {
+      throw new Error(`Refresh operation failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   private async killCursorProcess(): Promise<void> {
@@ -97,29 +105,19 @@ export class SystemIdentifierManager {
   }
 
   private generateNewIdentifiers() {
-    const newDeviceId = this.refreshDeviceId();
-    const macMachineId = SystemIdentifierManager.generateHexId(128);
+    const baseId = randomUUID();
+    const deviceId = SystemIdentifierManager.generateDeviceUUID(baseId);
+    const macMachineId = SystemIdentifierManager.generateMacMachineId(baseId);
 
     return {
       newIds: {
         'telemetry.macMachineId': macMachineId,
-        'telemetry.machineId': SystemIdentifierManager.generateHexId(64),
-        'telemetry.devDeviceId': newDeviceId,
-        'telemetry.sqmId': `{${randomUUID().toUpperCase()}}`
+        'telemetry.machineId': SystemIdentifierManager.generateMachineId(baseId),
+        'telemetry.devDeviceId': deviceId,
+        'telemetry.sqmId': `{${deviceId.toUpperCase()}}`
       },
       macMachineId
     };
-  }
-
-  private refreshDeviceId(): string {
-    const newDeviceId = randomUUID();
-    const path = this.config.paths.deviceId;
-
-    if (existsSync(path)) {
-      writeFileSync(path, newDeviceId);
-    }
-
-    return newDeviceId;
   }
 
   private async updatePlatformUuid(macMachineId: string): Promise<void> {
